@@ -31,7 +31,7 @@ pub enum TranscodeError {
 pub struct Metadata<'a> {
     pub album: Option<&'a str>,
     pub album_artist: Option<&'a str>,
-    pub artist: Option<Cow<'a, str>>,
+    pub artists: Vec<&'a str>,
     pub title: Option<&'a str>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
@@ -42,15 +42,11 @@ impl<'a> From<(&'a TrackResult, &'a Artist)> for Metadata<'a> {
         Self {
             album: Some(&track.album.title),
             album_artist: Some(&artist.name),
-            artist: Some(
-                track
-                    .artists
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-                    .into(),
-            ),
+            artists: track
+                .artists
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
             title: Some(&track.title),
             track_number: Some(track.track_number),
             disc_number: Some(track.volume_number),
@@ -60,8 +56,10 @@ impl<'a> From<(&'a TrackResult, &'a Artist)> for Metadata<'a> {
 
 pub struct Transcoder<S> {
     child: Child,
+    artists: Vec<String>,
     stream: S,
     track_id: TrackId,
+    output: String,
 }
 
 impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<S> {
@@ -100,9 +98,9 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             args.push(format!("album_artist={album_artist}"));
         }
 
-        if let Some(artist) = metadata.artist {
+        if metadata.artists.len() == 1 {
             args.push("-metadata".to_string());
-            args.push(format!("artist={artist}"));
+            args.push(format!("artist={}", metadata.artists[0]));
         }
 
         if let Some(title) = metadata.title {
@@ -132,6 +130,8 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             child,
             stream,
             track_id,
+            artists: metadata.artists.iter().map(|s| s.to_string()).collect(),
+            output: output.to_string(),
         })
     }
 
@@ -175,6 +175,24 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         if !status.success() {
             tracing::error!(%status, "ffmpeg exited with non-zero status");
             return Err(TranscodeError::NonZeroExit(status));
+        }
+
+        // we also need to run opustags for multi artist
+        if self.artists.len() > 1 {
+            let mut args = vec!["-i"].into_iter().map(String::from).collect::<Vec<_>>();
+
+            for artist in self.artists {
+                args.push("-a".to_string());
+                args.push(format!("ARTISTS={artist}"));
+            }
+
+            args.push(self.output.clone());
+
+            let status = Command::new("opustags").args(&args).status().await?;
+            if !status.success() {
+                tracing::error!(%status, "opustags exited with non-zero status");
+                return Err(TranscodeError::NonZeroExit(status));
+            }
         }
 
         tx.send(ProgressUpdate::Finished {
