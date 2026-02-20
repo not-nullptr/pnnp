@@ -18,9 +18,22 @@ pub async fn handle_interaction(
     interaction: &serenity::Interaction,
     data: &Data,
 ) -> Result<(), Error> {
-    // we only care about select menu interactions for now
     match interaction {
         serenity::Interaction::Component(i) => {
+            if let Some(m) = i.message.interaction_metadata.as_deref() {
+                if !is_from(m, i.user.id) {
+                    i.create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("sorry, you can't interact with this")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
             match i.data.custom_id.as_str() {
                 "album_select" => {
                     tracing::info!("handling album select interaction");
@@ -200,4 +213,15 @@ async fn handle_download(
     .await?;
 
     Ok(())
+}
+
+fn is_from(metadata: &serenity::MessageInteractionMetadata, user_id: serenity::UserId) -> bool {
+    let original = match metadata {
+        serenity::MessageInteractionMetadata::Command(c) => &c.user,
+        serenity::MessageInteractionMetadata::Component(c) => &c.user,
+        serenity::MessageInteractionMetadata::ModalSubmit(m) => &m.user,
+        _ => return false,
+    };
+
+    original.id == user_id
 }

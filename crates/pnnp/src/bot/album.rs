@@ -14,7 +14,7 @@ pub async fn album(
     #[description = "album name to search for"] query: String,
 ) -> Result<(), Error> {
     let client = &ctx.data().client;
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
     let albums = client.search_albums(query).await?;
     if albums.is_empty() {
         ctx.say("no albums found").await?;
@@ -53,7 +53,9 @@ pub async fn album(
                 .collect(),
         },
     )
-    .placeholder("select an album...");
+    .placeholder("select an album...")
+    .max_values(1)
+    .min_values(1);
 
     ctx.send(
         CreateReply::default()
