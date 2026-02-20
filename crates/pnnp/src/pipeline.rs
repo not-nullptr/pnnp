@@ -1,11 +1,10 @@
 use crate::{
-    GLOBAL_SEMAPHORE,
     config::Config,
     ffmpeg::{Metadata, TranscodeError, Transcoder},
 };
 use chrono::Datelike;
 use futures::StreamExt;
-use monochrome::{Monochrome, MonochromeError, album::Album, id::TrackId};
+use monochrome::{GLOBAL_SEMAPHORE, Monochrome, MonochromeError, album::Album, id::TrackId};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::{

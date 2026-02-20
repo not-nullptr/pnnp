@@ -28,7 +28,7 @@ use uuid::Uuid;
 const BASE_URL: &'static str = "https://arran.monochrome.tf";
 const RESOURCES_URL: &'static str = "https://resources.tidal.com/images";
 
-static GLOBAL_SEMAPHORE: OnceCell<Semaphore> = OnceCell::const_new();
+pub static GLOBAL_SEMAPHORE: OnceCell<Semaphore> = OnceCell::const_new();
 
 pub fn init_global_semaphore(permits: usize) {
     GLOBAL_SEMAPHORE.set(Semaphore::new(permits)).ok();
