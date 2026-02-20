@@ -6,8 +6,6 @@ mod pipeline;
 use monochrome::Monochrome;
 use tokio::sync::{OnceCell, Semaphore};
 
-static GLOBAL_SEMAPHORE: OnceCell<Semaphore> = OnceCell::const_new();
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -19,11 +17,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::load()?;
-    let client = Monochrome::new();
 
-    GLOBAL_SEMAPHORE
-        .set(Semaphore::new(config.downloads.global_semaphore))
-        .map_err(|_| anyhow::anyhow!("failed to set global semaphore"))?;
+    monochrome::init_global_semaphore(config.downloads.global_semaphore);
+
+    let client = Monochrome::new();
 
     bot::start(client, config).await?;
 
