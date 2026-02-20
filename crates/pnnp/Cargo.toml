@@ -1,0 +1,11 @@
+[package]
+name = "pnnp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.49.0", features = ["full"] }
+monochrome = { path = "../monochrome" }
+anyhow = "1.0.101"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
