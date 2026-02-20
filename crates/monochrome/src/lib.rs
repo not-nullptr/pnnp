@@ -1,23 +1,32 @@
+pub mod album;
+pub mod artist;
 mod error;
-mod id;
+pub mod id;
 mod response;
-mod track;
+pub mod track;
+
+use std::sync::Arc;
 
 use crate::{
+    album::{Album, AlbumResult},
+    artist::Artist,
     error::MonochromeManifestError,
-    id::TrackId,
+    id::{AlbumId, TrackId},
     response::MonochromeResponse,
     track::{Track, TrackResult},
 };
-use dash_mpd::fetch::DashDownloader;
+use async_stream::try_stream;
+use bytes::Bytes;
 pub use error::MonochromeError;
+use futures::Stream;
 use reqwest::Url;
 use roxmltree::Document;
-use serde::Deserialize;
-use tokio::fs::File;
+use serde::{Deserialize, Deserializer};
+use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
-const BASE_URL: &'static str = "https://eu-central.monochrome.tf";
+const BASE_URL: &'static str = "https://arran.monochrome.tf";
+const RESOURCES_URL: &'static str = "https://resources.tidal.com/images";
 
 #[derive(Debug, Clone)]
 pub struct Monochrome {
@@ -34,10 +43,21 @@ impl Monochrome {
     pub async fn track(&self, id: impl Into<TrackId>) -> Result<Track, MonochromeError> {
         const PATH: &'static str = "track";
         const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
-        self.fetch(URL, [("id", id.into())]).await
+        self.fetch(
+            URL,
+            [
+                ("id", id.into().to_string().as_ref()),
+                ("quality", "HI_RES_LOSSLESS"),
+            ],
+        )
+        .await
     }
 
-    pub async fn download_track(&self, track: &Track) -> Result<Vec<u8>, MonochromeError> {
+    pub async fn download_track(
+        &self,
+        track: &Track,
+        concurrency: usize,
+    ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
         let manifest = track.decode_manifest()?;
         #[derive(Debug, Deserialize)]
         struct UrlHolder {
@@ -45,7 +65,9 @@ impl Monochrome {
         }
 
         let url = if manifest.contains("<MPD") {
-            return Ok(self.download_mpd(manifest).await?);
+            return Ok(MaybeMpdStream::Mpd(Box::pin(
+                self.download_mpd(manifest, concurrency).await?,
+            )));
         } else if let Ok(urls) = serde_json::from_str::<UrlHolder>(&manifest)
             && let Some(url) = urls.urls.into_iter().next()
         {
@@ -59,82 +81,100 @@ impl Monochrome {
             return Err(MonochromeError::Non200(res.text().await?));
         }
 
-        let bytes = res.bytes().await?;
+        let bytes = res.bytes_stream();
 
-        Ok(bytes.into())
+        Ok(MaybeMpdStream::Regular(bytes))
     }
 
-    async fn download_mpd(&self, manifest: String) -> Result<Vec<u8>, MonochromeManifestError> {
-        // let doc = Document::parse(&manifest)?;
+    async fn download_mpd(
+        &self,
+        manifest: String,
+        concurrency: usize,
+    ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeManifestError> {
+        let doc = Document::parse(&manifest)?;
 
-        // let seg = doc
-        //     .descendants()
-        //     .find(|n| n.tag_name().name() == "SegmentTemplate")
-        //     .ok_or_else(|| MonochromeManifestError::MissingSegmentTemplate)?;
+        let seg = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "SegmentTemplate")
+            .ok_or_else(|| MonochromeManifestError::MissingSegmentTemplate)?;
 
-        // let init_tpl = seg
-        //     .attribute("initialization")
-        //     .ok_or_else(|| MonochromeManifestError::MissingInitializationTemplate)?;
+        let init_tpl = seg
+            .attribute("initialization")
+            .ok_or_else(|| MonochromeManifestError::MissingInitializationTemplate)?;
 
-        // let media_tpl = seg
-        //     .attribute("media")
-        //     .ok_or_else(|| MonochromeManifestError::MissingMedia)?;
+        let media_tpl = seg
+            .attribute("media")
+            .ok_or_else(|| MonochromeManifestError::MissingMedia)?;
 
-        // let start_number: u64 = seg
-        //     .attribute("startNumber")
-        //     .and_then(|s| s.parse().ok())
-        //     .unwrap_or(1);
+        let start_number: u64 = seg
+            .attribute("startNumber")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
 
-        // let mut segment_counts: Vec<u64> = Vec::new();
-        // if let Some(tl) = seg
-        //     .children()
-        //     .find(|c| c.tag_name().name() == "SegmentTimeline")
-        // {
-        //     for s in tl.children().filter(|c| c.tag_name().name() == "S") {
-        //         let d: u64 = s
-        //             .attribute("d")
-        //             .and_then(|v| v.parse().ok())
-        //             .ok_or_else(|| MonochromeManifestError::SMissingD)?;
-        //         let r: i64 = s.attribute("r").and_then(|v| v.parse().ok()).unwrap_or(0);
-        //         for _ in 0..=(r as usize) {
-        //             segment_counts.push(d);
-        //         }
-        //     }
-        // } else {
-        //     segment_counts.push(0);
-        // }
+        let mut segment_counts: Vec<u64> = Vec::new();
+        if let Some(tl) = seg
+            .children()
+            .find(|c| c.tag_name().name() == "SegmentTimeline")
+        {
+            for s in tl.children().filter(|c| c.tag_name().name() == "S") {
+                let d: u64 = s
+                    .attribute("d")
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| MonochromeManifestError::SMissingD)?;
+                let r: i64 = s.attribute("r").and_then(|v| v.parse().ok()).unwrap_or(0);
+                for _ in 0..=(r as usize) {
+                    segment_counts.push(d);
+                }
+            }
+        } else {
+            segment_counts.push(0);
+        }
 
-        // let replace_number = |tpl: &str, n: u64| tpl.replace("$Number$", &n.to_string());
+        let init_url = Url::parse(init_tpl)?;
+        let media_tpl = media_tpl.to_string();
 
-        // let mut out: Vec<u8> = Vec::new();
+        Ok(try_stream! {
+            let init_bytes = self.client.get(init_url).send().await?.bytes().await?;
+            yield init_bytes;
 
-        // let init_url = Url::parse(init_tpl)?;
+            let sem = Arc::new(Semaphore::new(concurrency));
+            let (tx, mut rx) = mpsc::channel::<(usize, Result<Bytes, reqwest::Error>)>(concurrency * 2);
 
-        // let init_bytes = self.client.get(init_url).send().await?.bytes().await?;
-        // out.extend_from_slice(&init_bytes);
+            for (idx, _dur) in segment_counts.iter().enumerate() {
+                let tx = tx.clone();
+                let media_tpl = media_tpl.clone();
+                let client = self.client.clone();
+                let sem = sem.clone();
+                let number = start_number + idx as u64;
+                tokio::spawn(async move {
+                    // acquires a permit (limits concurrent in-flight requests)
+                    let _permit = sem.acquire_owned().await.unwrap();
+                    let url = media_tpl.replace("$Number$", &number.to_string());
+                    let res = match client.get(url).send().await {
+                        Ok(resp) => resp.bytes().await,
+                        Err(e) => Err(e),
+                    };
+                    let _ = tx.send((idx, res)).await;
+                });
+            }
+            drop(tx);
 
-        // // Fetch each media segment by increasing $Number$
-        // for (idx, _dur) in segment_counts.iter().enumerate() {
-        //     let number = start_number + idx as u64;
-        //     let url = replace_number(media_tpl, number);
-        //     let bytes = self.client.get(url).send().await?.bytes().await?;
-        //     out.extend_from_slice(&bytes);
-        // }
-
-        // Ok(out)
-
-        // this is so dumb...
-        let id = Uuid::new_v4();
-        let name = format!("monochrome-{}.mpd", id);
-        let path = std::env::temp_dir().join(name);
-
-        let mut file = File::options()
-            .write(true)
-            .truncate(true)
-            .create_new(true)
-            .open(&path)?;
-
-        file.write_all(manifest.as_bytes()).await?;
+            let mut buffer: Vec<Option<Result<Bytes, reqwest::Error>>> = Vec::with_capacity(segment_counts.len());
+            buffer.resize_with(segment_counts.len(), || None);
+            let mut next = 0usize;
+            while let Some((idx, res)) = rx.recv().await {
+                buffer[idx] = Some(res);
+                while next < buffer.len() {
+                    if let Some(res) = buffer[next].take() {
+                        let bytes = res?;
+                        yield bytes;
+                        next += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     pub async fn search_tracks(
@@ -154,6 +194,103 @@ impl Monochrome {
         Ok(res.items)
     }
 
+    pub async fn search_albums(
+        &self,
+        query: impl AsRef<str>,
+    ) -> Result<Vec<AlbumResult>, MonochromeError> {
+        let query = query.as_ref();
+
+        #[derive(Debug, Deserialize)]
+        struct Res {
+            albums: Albums,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct Albums {
+            items: Vec<AlbumResult>,
+        }
+
+        const PATH: &'static str = "search";
+        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
+        let res: Res = self.fetch(URL, [("al", query)]).await?;
+        Ok(res.albums.items)
+    }
+
+    pub async fn album(&self, id: impl Into<id::AlbumId>) -> Result<album::Album, MonochromeError> {
+        const PATH: &'static str = "album";
+        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct AlbumTemp {
+            pub id: AlbumId,
+            pub title: String,
+            pub release_date: chrono::NaiveDate,
+            pub artist: Artist,
+            pub artists: Vec<Artist>,
+            pub items: Vec<Item>,
+            pub cover: Uuid,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Item {
+            #[serde(rename = "type")]
+            pub kind: String,
+            #[serde(default, deserialize_with = "null_on_error")]
+            pub item: Option<TrackResult>,
+        }
+
+        let res: AlbumTemp = self
+            .fetch(URL, [("id", id.into().to_string().as_str())])
+            .await?;
+
+        let tracks = res
+            .items
+            .into_iter()
+            .filter_map(|i| {
+                if i.kind == "track"
+                    && let Some(track) = i.item
+                {
+                    Some(track)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(album::Album {
+            id: res.id,
+            title: res.title,
+            release_date: res.release_date,
+            artist: res.artist,
+            artists: res.artists,
+            cover: res.cover,
+            tracks,
+        })
+    }
+
+    pub async fn album_art(
+        &self,
+        album: &Album,
+    ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
+        self.art(album.cover).await
+    }
+
+    async fn art(
+        &self,
+        uuid: Uuid,
+    ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
+        let id = uuid.to_string().replace("-", "/");
+        let url = format!("{RESOURCES_URL}/{id}/1280x1280.jpg");
+        let res = self.client.get(url).send().await?;
+        if res.status() != reqwest::StatusCode::OK {
+            return Err(MonochromeError::Non200(res.text().await?));
+        }
+
+        Ok(res.bytes_stream())
+    }
+
     async fn fetch<T, Q>(&self, url: &str, query: Q) -> Result<T, MonochromeError>
     where
         T: serde::de::DeserializeOwned,
@@ -166,5 +303,42 @@ impl Monochrome {
 
         let data = response.json::<MonochromeResponse<T>>().await?;
         Ok(data.data)
+    }
+}
+
+pub enum MaybeMpdStream<
+    M: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    I: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+> {
+    Mpd(M),
+    Regular(I),
+}
+
+impl<
+    M: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    I: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+> Stream for MaybeMpdStream<M, I>
+{
+    type Item = Result<Bytes, reqwest::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match &mut *self {
+            MaybeMpdStream::Mpd(s) => std::pin::Pin::new(s).poll_next(cx),
+            MaybeMpdStream::Regular(s) => std::pin::Pin::new(s).poll_next(cx),
+        }
+    }
+}
+
+fn null_on_error<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    match T::deserialize(deserializer) {
+        Ok(v) => Ok(Some(v)),
+        Err(_) => Ok(None), // swallow error -> field becomes None
     }
 }

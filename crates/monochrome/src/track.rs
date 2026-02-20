@@ -1,6 +1,10 @@
-use crate::id::TrackId;
+use crate::{
+    artist::Artist,
+    id::{AlbumId, TrackId},
+};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,5 +26,18 @@ impl Track {
 pub struct TrackResult {
     pub id: TrackId,
     pub title: String,
+    pub artist: Artist,
+    pub artists: Vec<Artist>,
+    pub album: TrackAlbum,
     pub duration: u32,
+    pub track_number: u32,
+    pub volume_number: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackAlbum {
+    pub id: AlbumId,
+    pub title: String,
+    pub cover: Uuid,
 }

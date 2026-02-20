@@ -9,3 +9,18 @@ monochrome = { path = "../monochrome" }
 anyhow = "1.0.101"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+futures = "0.3.32"
+reqwest = "0.13.2"
+bytes = "1.11.1"
+thiserror = "2.0.18"
+toml = "1.0.3"
+figment = { version = "0.10.19", features = ["toml"] }
+dirs = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+chrono = "0.4.43"
+backoff = "0.4.0"
+tokio-retry = "0.3.0"
+poise = "0.6.1"
+unicode-ellipsis = "0.3.0"
+async-stream = "0.3.6"
+bytesize = "2.3.1"

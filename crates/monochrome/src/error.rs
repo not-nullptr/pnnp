@@ -58,4 +58,7 @@ pub enum MonochromeManifestError {
 
     #[error("fs error: {0}")]
     Fs(#[from] std::io::Error),
+
+    #[error("invalid temp path")]
+    InvalidTempPath,
 }

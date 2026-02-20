@@ -1,1 +1,6 @@
 /target
+output.mp4
+output.opus
+output.flac
+config.toml
+output/

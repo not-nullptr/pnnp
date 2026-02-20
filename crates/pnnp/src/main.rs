@@ -1,4 +1,7 @@
-use std::fs;
+mod bot;
+mod config;
+mod ffmpeg;
+mod pipeline;
 
 use monochrome::Monochrome;
 
@@ -12,13 +15,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let config = config::load()?;
     let client = Monochrome::new();
-    let tracks = client.search_tracks("ARE WE STILL FRIENDS?").await?;
-    let track_result = tracks.first().expect("no tracks found");
-    let track = client.track(track_result.id).await?;
 
-    let data = client.download_track(&track).await?;
-    fs::write("output.mp4", data)?;
+    bot::start(client, config).await?;
 
     Ok(())
 }
