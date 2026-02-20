@@ -128,7 +128,7 @@ async fn handle_download(
     let pipeline = Pipeline::new(client.clone(), album, config, tx);
 
     let handles = pipeline.begin().await;
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
     let create_str = |tracks: &HashMap<TrackId, Progress>| {
         let mut sorted = tracks.values().collect::<Vec<_>>();
