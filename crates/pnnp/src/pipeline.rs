@@ -110,6 +110,8 @@ impl Pipeline {
                 continue;
             }
 
+            let artist = self.album.artist.clone();
+
             let handle: JoinHandle<Result<(), PipelineError>> = tokio::spawn(async move {
                 let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(5);
                 let tx = tx;
@@ -119,8 +121,12 @@ impl Pipeline {
                     let _permit = permit.acquire().await?;
                     let dl_info = client.track(track.id).await?;
                     let stream = client.download_track(&dl_info, chunk_concurrency).await?;
-                    let transcoder =
-                        Transcoder::new(stream, Metadata::from(&track), track.id, &path)?;
+                    let transcoder = Transcoder::new(
+                        stream,
+                        Metadata::from((&track, &artist)),
+                        track.id,
+                        &path,
+                    )?;
                     transcoder.run(&tx).await?;
                     Ok(())
                 })
@@ -132,6 +138,7 @@ impl Pipeline {
 
         {
             let client = self.client.clone();
+            let title = self.album.title.clone();
             let album_art_handle: JoinHandle<Result<(), PipelineError>> =
                 tokio::spawn(async move {
                     let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(5);
@@ -142,7 +149,7 @@ impl Pipeline {
                             return Ok(());
                         }
 
-                        tracing::info!(album = %self.album.title, "downloading album art...");
+                        tracing::info!(album = %title, "downloading album art...");
                         let album = client.album(self.album.id).await?;
                         let _permit = semaphore.acquire().await?;
                         let mut stream = client.album_art(&album).await?;
@@ -152,7 +159,7 @@ impl Pipeline {
                             file.write_all(&chunk).await?;
                         }
 
-                        tracing::info!(album = %self.album.title, "finished downloading album art");
+                        tracing::info!(album = %title, "finished downloading album art");
 
                         Ok(())
                     })

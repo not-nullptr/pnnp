@@ -1,5 +1,10 @@
 use futures::{Stream, StreamExt};
-use monochrome::{id::TrackId, track::TrackResult};
+use monochrome::{
+    album::{Album, AlbumResult},
+    artist::Artist,
+    id::TrackId,
+    track::TrackResult,
+};
 use std::{borrow::Cow, process::Stdio};
 use thiserror::Error;
 use tokio::{
@@ -32,19 +37,11 @@ pub struct Metadata<'a> {
     pub disc_number: Option<u32>,
 }
 
-impl<'a> From<&'a TrackResult> for Metadata<'a> {
-    fn from(track: &'a TrackResult) -> Self {
+impl<'a> From<(&'a TrackResult, &'a Artist)> for Metadata<'a> {
+    fn from((track, artist): (&'a TrackResult, &'a Artist)) -> Self {
         Self {
             album: Some(&track.album.title),
-            album_artist: Some(
-                track
-                    .artists
-                    .iter()
-                    .find(|a| a.kind == "MAIN")
-                    .unwrap_or(&track.artist)
-                    .name
-                    .as_str(),
-            ),
+            album_artist: Some(&artist.name),
             artist: Some(
                 track
                     .artists

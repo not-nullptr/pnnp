@@ -18,7 +18,7 @@ impl Track {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackResult {
     pub id: TrackId,
@@ -31,7 +31,7 @@ pub struct TrackResult {
     pub volume_number: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackAlbum {
     pub id: AlbumId,
@@ -39,7 +39,7 @@ pub struct TrackAlbum {
     pub cover: Uuid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackArtist {
     pub id: ArtistId,
