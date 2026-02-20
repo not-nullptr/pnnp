@@ -36,14 +36,22 @@ impl<'a> From<&'a TrackResult> for Metadata<'a> {
     fn from(track: &'a TrackResult) -> Self {
         Self {
             album: Some(&track.album.title),
-            album_artist: Some(&track.artist.name),
+            album_artist: Some(
+                track
+                    .artists
+                    .iter()
+                    .find(|a| a.kind == "MAIN")
+                    .unwrap_or(&track.artist)
+                    .name
+                    .as_str(),
+            ),
             artist: Some(
                 track
                     .artists
                     .iter()
                     .map(|a| a.name.as_str())
                     .collect::<Vec<_>>()
-                    .join(";")
+                    .join("; ")
                     .into(),
             ),
             title: Some(&track.title),
