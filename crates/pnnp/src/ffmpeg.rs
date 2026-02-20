@@ -35,10 +35,11 @@ pub struct Metadata<'a> {
     pub title: Option<&'a str>,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
+    pub year: Option<u32>,
 }
 
-impl<'a> From<(&'a TrackResult, &'a Artist)> for Metadata<'a> {
-    fn from((track, artist): (&'a TrackResult, &'a Artist)) -> Self {
+impl<'a> From<(&'a TrackResult, &'a Artist, u32)> for Metadata<'a> {
+    fn from((track, artist, year): (&'a TrackResult, &'a Artist, u32)) -> Self {
         Self {
             album: Some(&track.album.title),
             album_artist: Some(&artist.name),
@@ -50,6 +51,7 @@ impl<'a> From<(&'a TrackResult, &'a Artist)> for Metadata<'a> {
             title: Some(&track.title),
             track_number: Some(track.track_number),
             disc_number: Some(track.volume_number),
+            year: Some(year),
         }
     }
 }
@@ -116,6 +118,11 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         if let Some(disc_number) = metadata.disc_number {
             args.push("-metadata".to_string());
             args.push(format!("disc={disc_number}"));
+        }
+
+        if let Some(year) = metadata.year {
+            args.push("-metadata".to_string());
+            args.push(format!("year={year}"));
         }
 
         args.push(output.to_string());

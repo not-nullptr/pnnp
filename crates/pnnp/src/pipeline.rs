@@ -84,6 +84,8 @@ impl Pipeline {
             return vec![tokio::spawn(async { Err(PipelineError::Io(e)) })];
         }
 
+        let year = self.album.release_date.year() as u32;
+
         for track in self.album.tracks {
             let permit = semaphore.clone();
             let client = self.client.clone();
@@ -124,7 +126,7 @@ impl Pipeline {
                     let stream = client.download_track(&dl_info, chunk_concurrency).await?;
                     let transcoder = Transcoder::new(
                         stream,
-                        Metadata::from((&track, &artist)),
+                        Metadata::from((&track, &artist, year)),
                         track.id,
                         &path,
                     )?;
