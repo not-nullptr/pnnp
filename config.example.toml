@@ -3,8 +3,8 @@ dir = "./output"
 
 [bot]
 token = "SECRET_TOKEN_HERE"
+progress_channel = 123456789012345678
 
 [downloads]
-chunk_concurrency = 8
-track_concurrency = 4
-global_semaphore = 32
+chunk_concurrency = 12
+track_concurrency = 6

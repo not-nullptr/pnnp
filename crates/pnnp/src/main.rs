@@ -4,12 +4,14 @@ mod ffmpeg;
 mod pipeline;
 
 use monochrome::Monochrome;
-use tokio::sync::{OnceCell, Semaphore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(tokio_unstable)]
+    console_subscriber::init();
+
+    #[cfg(not(tokio_unstable))]
     tracing_subscriber::fmt()
-        // hardcode monochrome=debug,pnnp=debug
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or("monochrome=debug,pnnp=debug".into()),
@@ -17,9 +19,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::load()?;
-
-    monochrome::init_global_semaphore(config.downloads.global_semaphore);
-
     let client = Monochrome::new();
 
     bot::start(client, config).await?;

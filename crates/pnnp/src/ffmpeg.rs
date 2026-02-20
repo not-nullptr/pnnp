@@ -1,19 +1,18 @@
 use futures::{Stream, StreamExt};
 use monochrome::{
-    album::{Album, AlbumResult},
     artist::Artist,
-    id::TrackId,
+    id::{AlbumId, TrackId},
     track::TrackResult,
 };
-use std::{borrow::Cow, process::Stdio};
+use std::process::Stdio;
 use thiserror::Error;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncBufReadExt, AsyncWriteExt},
     process::{Child, Command},
     sync::mpsc,
 };
 
-use crate::pipeline::ProgressUpdate;
+use crate::pipeline::{ProgressState, ProgressUpdate};
 
 #[derive(Debug, Error)]
 pub enum TranscodeError {
@@ -61,6 +60,7 @@ pub struct Transcoder<S> {
     artists: Vec<String>,
     stream: S,
     track_id: TrackId,
+    album_id: AlbumId,
     output: String,
 }
 
@@ -69,6 +69,7 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         stream: S,
         metadata: Metadata,
         track_id: TrackId,
+        album_id: AlbumId,
         output: &str,
     ) -> Result<Self, std::io::Error> {
         let mut args = vec![
@@ -137,19 +138,31 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             child,
             stream,
             track_id,
+            album_id,
             artists: metadata.artists.iter().map(|s| s.to_string()).collect(),
             output: output.to_string(),
         })
     }
 
-    pub async fn run(mut self, tx: &mpsc::Sender<ProgressUpdate>) -> Result<(), TranscodeError> {
-        tracing::debug!("starting transcoder run...");
+    pub async fn run(
+        mut self,
+        tx: &mpsc::UnboundedSender<ProgressUpdate>,
+    ) -> Result<(), TranscodeError> {
+        if let Some(stderr) = self.child.stderr.take() {
+            let mut reader = tokio::io::BufReader::new(stderr).lines();
 
-        tx.send(ProgressUpdate::Downloading {
+            tokio::spawn(async move {
+                while let Ok(Some(line)) = reader.next_line().await {
+                    tracing::debug!("ffmpeg: {}", line);
+                }
+            });
+        }
+
+        tx.send(ProgressUpdate {
+            album_id: self.album_id,
             track_id: self.track_id,
-            bytes_downloaded: 0,
+            state: ProgressState::Downloading(0),
         })
-        .await
         .ok();
 
         let mut stdin = self.child.stdin.take().ok_or(TranscodeError::StdinOpen)?;
@@ -160,23 +173,32 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             let chunk = chunk.map_err(|_| TranscodeError::StdinOpen)?;
             stdin.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
-            tx.send(ProgressUpdate::Downloading {
+
+            tx.send(ProgressUpdate {
+                album_id: self.album_id,
                 track_id: self.track_id,
-                bytes_downloaded: downloaded,
+                state: ProgressState::Downloading(downloaded),
             })
-            .await
             .ok();
         }
 
+        tracing::debug!(
+            "finished downloading track {}, writing to ffmpeg stdin...",
+            self.track_id
+        );
+
         stdin.flush().await?;
 
-        tx.send(ProgressUpdate::Transcoding {
+        tx.send(ProgressUpdate {
+            album_id: self.album_id,
             track_id: self.track_id,
+            state: ProgressState::Transcoding,
         })
-        .await
         .ok();
 
+        stdin.shutdown().await?;
         drop(stdin); // idk why shutdown() doesn't work but this does so
+
         tracing::debug!("finished writing to ffmpeg stdin, waiting for ffmpeg to exit...");
         let status = self.child.wait().await?;
         if !status.success() {
@@ -202,10 +224,11 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             }
         }
 
-        tx.send(ProgressUpdate::Finished {
+        tx.send(ProgressUpdate {
+            album_id: self.album_id,
             track_id: self.track_id,
+            state: ProgressState::Finished,
         })
-        .await
         .ok();
 
         Ok(())

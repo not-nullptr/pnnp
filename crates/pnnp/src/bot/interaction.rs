@@ -1,16 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
-
-use crate::{
-    config::Config,
-    pipeline::{Pipeline, ProgressUpdate},
-};
-
 use super::{Data, Error};
-use monochrome::{Monochrome, id::TrackId};
+use crate::{bot::progress::ProgressTaskMessage, config::Config, pipeline::Pipeline};
+use monochrome::{Monochrome, album::Album};
 use poise::serenity_prelude::{
     self as serenity, ComponentInteractionDataKind, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EditMessage,
+    CreateInteractionResponseMessage, EditInteractionResponse,
 };
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub async fn handle_interaction(
@@ -50,28 +45,51 @@ pub async fn handle_interaction(
                     };
 
                     tracing::info!(%album_id, "selected album id");
-                    i.defer(&ctx.http).await?;
 
-                    let mut msg = i.create_followup(
-                        &ctx.http,
-                        CreateInteractionResponseFollowup::new()
-                            .content("beginning download... this may take a while! todo: progress updates :)"),
-                    )
-                    .await?;
+                    // let album = client.album(album_id).await?;
 
-                    if let Err(e) = handle_download(
-                        &data.client,
-                        data.config.clone(),
-                        album_id,
-                        &mut msg,
-                        ctx.http.as_ref(),
-                    )
-                    .await
+                    let album = match data.client.album(album_id).await {
+                        Ok(album) => album,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to fetch album for selected album id");
+                            i.create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("failed to fetch album for selected album id"),
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+
+                    i
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(
+                                format!(
+                                    "your download (**{} - {}**) will start soon! check <#{}> for progress updates",
+                                    album.artist.name, album.title,
+                                    data.config.bot.progress_channel
+                                )
+                            )
+                        ))
+                        .await?;
+
+                    if let Err(e) =
+                        handle_download(&data.client, data.config.clone(), album, data).await
                     {
                         tracing::error!(error = %e, "failed to download album");
-                        msg.edit(
+
+                        data.progress_tx
+                            .send(ProgressTaskMessage::Done(album_id.into()))
+                            .ok();
+
+                        i.edit_response(
                             &ctx.http,
-                            EditMessage::new().content(format!("failed to download album: {e}")),
+                            EditInteractionResponse::new()
+                                .content(format!("failed to download album: {e}")),
                         )
                         .await?;
                     }
@@ -87,130 +105,40 @@ pub async fn handle_interaction(
     Ok(())
 }
 
-struct Progress {
-    track_name: String,
-    track_sort: (u32, u32),
-    track_progress: TrackProgress,
-}
-
-enum TrackProgress {
-    Waiting,
-    Downloading(u64),
-    Transcoding,
-    Finished,
-}
-
 async fn handle_download(
     client: &Monochrome,
     config: Arc<Config>,
-    album_id: u64,
-    msg: &mut serenity::Message,
-    http: &serenity::http::Http,
+    album: Album,
+    data: &Data,
 ) -> anyhow::Result<()> {
-    let album = client.album(album_id).await?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let mut tracks = album
-        .tracks
-        .iter()
-        .map(|t| {
-            (
-                t.id,
-                Progress {
-                    track_name: t.title.clone(),
-                    track_sort: (t.volume_number, t.track_number),
-                    track_progress: TrackProgress::Waiting,
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let id = album.id;
 
-    let (tx, mut rx) = mpsc::channel(1024);
-    let pipeline = Pipeline::new(client.clone(), album, config, tx);
+    data.progress_tx
+        .send(ProgressTaskMessage::DiscoverAlbum(id, album.clone()))?;
 
-    let handles = pipeline.begin().await;
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let pipeline = Pipeline::new(
+        client.clone(),
+        album,
+        tx,
+        data.track_semaphore.clone(),
+        data.chunk_semaphore.clone(),
+        config,
+    );
 
-    let create_str = |tracks: &HashMap<TrackId, Progress>| {
-        let mut sorted = tracks.values().collect::<Vec<_>>();
-        sorted.sort_by_key(|t| t.track_sort);
+    let handle = tokio::spawn(pipeline.begin());
 
-        sorted
-            .into_iter()
-            .map(|t| {
-                let progress_str = match &t.track_progress {
-                    TrackProgress::Waiting => "waiting".to_string(),
-                    TrackProgress::Downloading(p) => {
-                        format!("downloading... {}", bytesize::ByteSize(*p))
-                    }
-                    TrackProgress::Transcoding => "transcoding...".to_string(),
-                    TrackProgress::Finished => "finished!".to_string(),
-                };
-
-                format!("**{}** - {}", t.track_name, progress_str)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    loop {
-        tokio::select! {
-            update = rx.recv() => {
-                let Some(update) = update else {
-                    break;
-                };
-
-                match update {
-                    ProgressUpdate::Downloading { track_id, bytes_downloaded } => {
-                        if let Some(track) = tracks.get_mut(&track_id) {
-                            track.track_progress = TrackProgress::Downloading(bytes_downloaded);
-                        }
-                    }
-
-                    ProgressUpdate::Transcoding { track_id } => {
-                        if let Some(track) = tracks.get_mut(&track_id) {
-                            track.track_progress = TrackProgress::Transcoding;
-                        }
-                    }
-
-                    ProgressUpdate::Finished { track_id } => {
-                        if let Some(track) = tracks.get_mut(&track_id) {
-                            track.track_progress = TrackProgress::Finished;
-                        }
-                    }
-                }
-            }
-
-            _ = interval.tick() => {
-
-                let curr_msg = create_str(&tracks);
-
-                msg.edit(
-                    http,
-                    EditMessage::new().content(format!("downloading album... this may take a while!\n\n{curr_msg}")),
-                )
-                .await?;
-            }
-        }
+    while let Some(update) = rx.recv().await {
+        data.progress_tx
+            .send(ProgressTaskMessage::Progress(update))?;
     }
 
-    for handle in handles {
+    for handle in handle.await? {
         handle.await??;
     }
 
-    // set all to complete just in case
-    for track in tracks.values_mut() {
-        track.track_progress = TrackProgress::Finished;
-    }
-
-    let curr_msg = create_str(&tracks);
-
-    msg.edit(
-        http,
-        EditMessage::new().content(format!(
-            "**download complete!** ask sophie or maddie to refresh navidrome if necessary ^_^\n\n{curr_msg}"
-        )),
-    )
-    .await?;
+    data.progress_tx.send(ProgressTaskMessage::Done(id))?;
 
     Ok(())
 }

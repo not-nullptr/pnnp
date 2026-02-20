@@ -4,7 +4,11 @@ use crate::{
 };
 use chrono::Datelike;
 use futures::StreamExt;
-use monochrome::{GLOBAL_SEMAPHORE, Monochrome, MonochromeError, album::Album, id::TrackId};
+use monochrome::{
+    Monochrome, MonochromeError,
+    album::Album,
+    id::{AlbumId, TrackId},
+};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::{
@@ -41,30 +45,35 @@ pub enum PipelineError {
 pub struct Pipeline {
     client: Monochrome,
     album: Album,
+    tx: mpsc::UnboundedSender<ProgressUpdate>,
+    track_semaphore: Arc<Semaphore>,
+    chunk_semaphore: Arc<Semaphore>,
     config: Arc<Config>,
-    tx: mpsc::Sender<ProgressUpdate>,
 }
 
 impl Pipeline {
     pub fn new(
         client: Monochrome,
         album: Album,
+        tx: mpsc::UnboundedSender<ProgressUpdate>,
+        track_semaphore: Arc<Semaphore>,
+        chunk_semaphore: Arc<Semaphore>,
         config: Arc<Config>,
-        tx: mpsc::Sender<ProgressUpdate>,
     ) -> Self {
         Self {
             client,
             album,
-            config,
             tx,
+            track_semaphore,
+            chunk_semaphore,
+            config,
         }
     }
 
     pub async fn begin(self) -> Vec<JoinHandle<Result<(), PipelineError>>> {
-        let track_concurrency = self.config.downloads.track_concurrency;
-        let chunk_concurrency = self.config.downloads.chunk_concurrency;
+        let track_semaphore = self.track_semaphore;
+        let chunk_semaphore = self.chunk_semaphore;
 
-        let semaphore = Arc::new(Semaphore::new(track_concurrency));
         let mut handles = Vec::new();
         let multidisc = self.album.tracks.iter().any(|t| t.volume_number > 1);
         let album_folder = PathBuf::from(&self.config.output.dir)
@@ -87,7 +96,7 @@ impl Pipeline {
         let year = self.album.release_date.year() as u32;
 
         for track in self.album.tracks {
-            let permit = semaphore.clone();
+            let semaphore = track_semaphore.clone();
             let client = self.client.clone();
             let path = album_folder.join(&path_compat(&if multidisc {
                 format!(
@@ -113,21 +122,25 @@ impl Pipeline {
             }
 
             let artist = self.album.artist.clone();
+            let chunk_semaphore = chunk_semaphore.clone();
+
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
 
             let handle: JoinHandle<Result<(), PipelineError>> = tokio::spawn(async move {
                 let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(5);
-                let tx = tx;
+                let _permit = permit;
 
                 Retry::spawn(retry_strategy, || async {
                     let path = path.to_string_lossy();
-                    let _permit = permit.acquire().await?;
-                    let _global = GLOBAL_SEMAPHORE.get().unwrap().acquire().await.unwrap();
                     let dl_info = client.track(track.id).await?;
-                    let stream = client.download_track(&dl_info, chunk_concurrency).await?;
+                    let stream = client
+                        .download_track(&dl_info, chunk_semaphore.clone())
+                        .await?;
                     let transcoder = Transcoder::new(
                         stream,
                         Metadata::from((&track, &artist, year)),
                         track.id,
+                        self.album.id,
                         &path,
                     )?;
                     transcoder.run(&tx).await?;
@@ -154,7 +167,6 @@ impl Pipeline {
 
                         tracing::info!(album = %title, "downloading album art...");
                         let album = client.album(self.album.id).await?;
-                        let _permit = semaphore.acquire().await?;
                         let mut stream = client.album_art(&album).await?;
                         let mut file = tokio::fs::File::create(&path).await?;
                         while let Some(chunk) = stream.next().await {
@@ -188,15 +200,30 @@ fn path_compat(s: &str) -> String {
         .replace("|", "_")
 }
 
-pub enum ProgressUpdate {
-    Downloading {
-        track_id: TrackId,
-        bytes_downloaded: u64,
-    },
-    Transcoding {
-        track_id: TrackId,
-    },
-    Finished {
-        track_id: TrackId,
-    },
+// pub enum ProgressUpdate {
+//     Downloading {
+//         album_id: AlbumId,
+//         track_id: TrackId,
+//         bytes_downloaded: u64,
+//     },
+//     Transcoding {
+//         album_id: AlbumId,
+//         track_id: TrackId,
+//     },
+//     Finished {
+//         album_id: AlbumId,
+//         track_id: TrackId,
+//     },
+// }
+
+pub struct ProgressUpdate {
+    pub album_id: AlbumId,
+    pub track_id: TrackId,
+    pub state: ProgressState,
+}
+
+pub enum ProgressState {
+    Downloading(u64),
+    Transcoding,
+    Finished,
 }

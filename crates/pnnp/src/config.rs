@@ -19,13 +19,13 @@ pub struct OutputConfig {
 #[derive(Debug, Deserialize)]
 pub struct BotConfig {
     pub token: String,
+    pub progress_channel: u64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DownloadConfig {
     pub chunk_concurrency: usize,
     pub track_concurrency: usize,
-    pub global_semaphore: usize,
 }
 
 pub fn load() -> anyhow::Result<Config> {

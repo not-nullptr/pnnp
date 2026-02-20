@@ -18,21 +18,15 @@ use crate::{
 use async_stream::try_stream;
 use bytes::Bytes;
 pub use error::MonochromeError;
-use futures::Stream;
+use futures::{Stream, StreamExt, stream::FuturesOrdered};
 use reqwest::Url;
 use roxmltree::Document;
 use serde::{Deserialize, Deserializer};
-use tokio::sync::{OnceCell, Semaphore, mpsc};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 const BASE_URL: &'static str = "https://arran.monochrome.tf";
 const RESOURCES_URL: &'static str = "https://resources.tidal.com/images";
-
-pub static GLOBAL_SEMAPHORE: OnceCell<Semaphore> = OnceCell::const_new();
-
-pub fn init_global_semaphore(permits: usize) {
-    GLOBAL_SEMAPHORE.set(Semaphore::new(permits)).ok();
-}
 
 #[derive(Debug, Clone)]
 pub struct Monochrome {
@@ -62,7 +56,7 @@ impl Monochrome {
     pub async fn download_track(
         &self,
         track: &Track,
-        concurrency: usize,
+        chunk_semaphore: Arc<Semaphore>,
     ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
         let manifest = track.decode_manifest()?;
         #[derive(Debug, Deserialize)]
@@ -72,7 +66,7 @@ impl Monochrome {
 
         let url = if manifest.contains("<MPD") {
             return Ok(MaybeMpdStream::Mpd(Box::pin(
-                self.download_mpd(manifest, concurrency).await?,
+                self.download_mpd(manifest, chunk_semaphore).await?,
             )));
         } else if let Ok(urls) = serde_json::from_str::<UrlHolder>(&manifest)
             && let Some(url) = urls.urls.into_iter().next()
@@ -95,7 +89,7 @@ impl Monochrome {
     async fn download_mpd(
         &self,
         manifest: String,
-        concurrency: usize,
+        chunk_semaphore: Arc<Semaphore>,
     ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeManifestError> {
         let doc = Document::parse(&manifest)?;
 
@@ -116,8 +110,6 @@ impl Monochrome {
             .attribute("startNumber")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-
-        let global = GLOBAL_SEMAPHORE.get().unwrap();
 
         let mut segment_counts: Vec<u64> = Vec::new();
         if let Some(tl) = seg
@@ -145,43 +137,22 @@ impl Monochrome {
             let init_bytes = self.client.get(init_url).send().await?.bytes().await?;
             yield init_bytes;
 
-            let sem = Arc::new(Semaphore::new(concurrency));
-            let (tx, mut rx) = mpsc::channel::<(usize, Result<Bytes, reqwest::Error>)>(1024);
+            let mut futs = FuturesOrdered::new();
 
             for (idx, _dur) in segment_counts.iter().enumerate() {
-                let tx = tx.clone();
-                let media_tpl = media_tpl.clone();
                 let client = self.client.clone();
-                let sem = sem.clone();
+                let sem = chunk_semaphore.clone();
                 let number = start_number + idx as u64;
-                tokio::spawn(async move {
-                    // acquires a permit (limits concurrent in-flight requests)
-                    let _permit = sem.acquire_owned().await.unwrap();
-                    let _global = GLOBAL_SEMAPHORE.get().unwrap().acquire().await.unwrap();
-                    let url = media_tpl.replace("$Number$", &number.to_string());
-                    let res = match client.get(url).send().await {
-                        Ok(resp) => resp.bytes().await,
-                        Err(e) => Err(e),
-                    };
-                    let _ = tx.send((idx, res)).await;
-                });
-            }
-            drop(tx);
+                let url = media_tpl.replace("$Number$", &number.to_string());
 
-            let mut buffer: Vec<Option<Result<Bytes, reqwest::Error>>> = Vec::with_capacity(segment_counts.len());
-            buffer.resize_with(segment_counts.len(), || None);
-            let mut next = 0usize;
-            while let Some((idx, res)) = rx.recv().await {
-                buffer[idx] = Some(res);
-                while next < buffer.len() {
-                    if let Some(res) = buffer[next].take() {
-                        let bytes = res?;
-                        yield bytes;
-                        next += 1;
-                    } else {
-                        break;
-                    }
-                }
+                futs.push_back(tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.unwrap();
+                    client.get(url).send().await?.bytes().await
+                }));
+            }
+
+            while let Some(res) = futs.next().await {
+                yield res.unwrap()?;
             }
         })
     }
