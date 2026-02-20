@@ -22,11 +22,17 @@ use futures::Stream;
 use reqwest::Url;
 use roxmltree::Document;
 use serde::{Deserialize, Deserializer};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OnceCell, Semaphore, mpsc};
 use uuid::Uuid;
 
 const BASE_URL: &'static str = "https://arran.monochrome.tf";
 const RESOURCES_URL: &'static str = "https://resources.tidal.com/images";
+
+static GLOBAL_SEMAPHORE: OnceCell<Semaphore> = OnceCell::const_new();
+
+pub fn init_global_semaphore(permits: usize) {
+    GLOBAL_SEMAPHORE.set(Semaphore::new(permits)).ok();
+}
 
 #[derive(Debug, Clone)]
 pub struct Monochrome {
@@ -111,6 +117,8 @@ impl Monochrome {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
 
+        let global = GLOBAL_SEMAPHORE.get().unwrap();
+
         let mut segment_counts: Vec<u64> = Vec::new();
         if let Some(tl) = seg
             .children()
@@ -138,7 +146,7 @@ impl Monochrome {
             yield init_bytes;
 
             let sem = Arc::new(Semaphore::new(concurrency));
-            let (tx, mut rx) = mpsc::channel::<(usize, Result<Bytes, reqwest::Error>)>(concurrency * 2);
+            let (tx, mut rx) = mpsc::channel::<(usize, Result<Bytes, reqwest::Error>)>(1024);
 
             for (idx, _dur) in segment_counts.iter().enumerate() {
                 let tx = tx.clone();
@@ -149,6 +157,7 @@ impl Monochrome {
                 tokio::spawn(async move {
                     // acquires a permit (limits concurrent in-flight requests)
                     let _permit = sem.acquire_owned().await.unwrap();
+                    let _global = GLOBAL_SEMAPHORE.get().unwrap().acquire().await.unwrap();
                     let url = media_tpl.replace("$Number$", &number.to_string());
                     let res = match client.get(url).send().await {
                         Ok(resp) => resp.bytes().await,

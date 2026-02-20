@@ -7,3 +7,4 @@ token = "SECRET_TOKEN_HERE"
 [downloads]
 chunk_concurrency = 8
 track_concurrency = 4
+global_semaphore = 32

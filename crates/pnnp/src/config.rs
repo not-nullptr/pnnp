@@ -25,6 +25,7 @@ pub struct BotConfig {
 pub struct DownloadConfig {
     pub chunk_concurrency: usize,
     pub track_concurrency: usize,
+    pub global_semaphore: usize,
 }
 
 pub fn load() -> anyhow::Result<Config> {

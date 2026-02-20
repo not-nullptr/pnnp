@@ -1,4 +1,5 @@
 use crate::{
+    GLOBAL_SEMAPHORE,
     config::Config,
     ffmpeg::{Metadata, TranscodeError, Transcoder},
 };
@@ -119,6 +120,7 @@ impl Pipeline {
                 Retry::spawn(retry_strategy, || async {
                     let path = path.to_string_lossy();
                     let _permit = permit.acquire().await?;
+                    let _global = GLOBAL_SEMAPHORE.get().unwrap().acquire().await.unwrap();
                     let dl_info = client.track(track.id).await?;
                     let stream = client.download_track(&dl_info, chunk_concurrency).await?;
                     let transcoder = Transcoder::new(
