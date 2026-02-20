@@ -39,22 +39,19 @@ pub async fn handle_interaction(
                     tracing::info!(%album_id, "selected album id");
                     i.defer(&ctx.http).await?;
 
-                    let mut msg = i
-                        .create_followup(
-                            &ctx.http,
-                            CreateInteractionResponseFollowup::new()
-                                .content("beginning download...")
-                                .ephemeral(true),
-                        )
-                        .await?;
+                    let mut msg = i.create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content("beginning download... this may take a while! todo: progress updates :)"),
+                    )
+                    .await?;
 
                     if let Err(e) = handle_download(
                         &data.client,
                         data.config.clone(),
                         album_id,
-                        msg.id,
+                        &mut msg,
                         ctx.http.as_ref(),
-                        i,
                     )
                     .await
                     {
@@ -94,9 +91,8 @@ async fn handle_download(
     client: &Monochrome,
     config: Arc<Config>,
     album_id: u64,
-    id: serenity::MessageId,
+    msg: &mut serenity::Message,
     http: &serenity::http::Http,
-    i: &serenity::ComponentInteraction,
 ) -> anyhow::Result<()> {
     let album = client.album(album_id).await?;
 
@@ -175,8 +171,10 @@ async fn handle_download(
 
                 let curr_msg = create_str(&tracks);
 
-                i
-                .edit_followup(http, id, CreateInteractionResponseFollowup::new().content(format!("downloading album... this may take a while!\n\n{curr_msg}")))
+                msg.edit(
+                    http,
+                    EditMessage::new().content(format!("downloading album... this may take a while!\n\n{curr_msg}")),
+                )
                 .await?;
             }
         }
@@ -193,10 +191,9 @@ async fn handle_download(
 
     let curr_msg = create_str(&tracks);
 
-    i.edit_followup(
+    msg.edit(
         http,
-        id,
-        CreateInteractionResponseFollowup::new().content(format!(
+        EditMessage::new().content(format!(
             "**download complete!** ask sophie or maddie to refresh navidrome if necessary ^_^\n\n{curr_msg}"
         )),
     )
