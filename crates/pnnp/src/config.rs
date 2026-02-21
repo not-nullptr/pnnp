@@ -9,6 +9,7 @@ pub struct Config {
     pub output: OutputConfig,
     pub bot: BotConfig,
     pub downloads: DownloadConfig,
+    pub navidrome: Option<NavidromeConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +27,13 @@ pub struct BotConfig {
 pub struct DownloadConfig {
     pub chunk_concurrency: usize,
     pub track_concurrency: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NavidromeConfig {
+    pub url: String,
+    pub username: String,
+    pub password: String,
 }
 
 pub fn load() -> anyhow::Result<Config> {

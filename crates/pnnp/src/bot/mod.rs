@@ -58,7 +58,7 @@ pub async fn start(client: Monochrome, config: Config) -> anyhow::Result<()> {
 
                     // send a message to the progress channel just to indicate that the bot is online and working
                     let (tx, rx) = mpsc::unbounded_channel();
-                    let mut task = ProgressTask::new(rx, ctx.http.clone(), channel);
+                    let mut task = ProgressTask::new(rx, ctx.http.clone(), channel, &config);
                     tokio::spawn(async move {
                         if let Err(e) = task.run().await {
                             tracing::error!(error = %e, "progress task failed");

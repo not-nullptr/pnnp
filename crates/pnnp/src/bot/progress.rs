@@ -10,9 +10,13 @@ use std::{
     fmt::Write,
     time::{Duration, Instant},
 };
+use submarine::auth::AuthBuilder;
 use tokio::sync::mpsc;
 
-use crate::pipeline::{ProgressState, ProgressUpdate};
+use crate::{
+    config::Config,
+    pipeline::{ProgressState, ProgressUpdate},
+};
 
 pub struct ProgressTask {
     rx: mpsc::UnboundedReceiver<ProgressTaskMessage>,
@@ -20,6 +24,7 @@ pub struct ProgressTask {
     channel: serenity::ChannelId,
     albums: HashMap<AlbumId, AlbumProgress>,
     count: usize,
+    submarine: Option<submarine::Client>,
 }
 
 pub enum ProgressTaskMessage {
@@ -37,7 +42,7 @@ struct AlbumProgress {
 }
 
 struct TrackProgress {
-    name: String,
+    // name: String,
     sort: (u32, u32),
     state: Option<ProgressState>,
     last_known_bytes: u64,
@@ -48,6 +53,7 @@ impl ProgressTask {
         rx: mpsc::UnboundedReceiver<ProgressTaskMessage>,
         http: Arc<serenity::Http>,
         channel: serenity::ChannelId,
+        config: &Config,
     ) -> Self {
         Self {
             rx,
@@ -55,6 +61,14 @@ impl ProgressTask {
             channel,
             albums: HashMap::new(),
             count: 0,
+            submarine: config.navidrome.as_ref().map(|nav| {
+                submarine::Client::new(
+                    &nav.url,
+                    AuthBuilder::new(&nav.username, "1.16.1")
+                        .client_name("pnnp auto-refresh")
+                        .hashed(&nav.password),
+                )
+            }),
         }
     }
 
@@ -94,7 +108,7 @@ impl ProgressTask {
                                             (
                                                 t.id,
                                                 TrackProgress {
-                                                    name: t.title,
+                                                    // name: t.title,
                                                     sort: (t.volume_number, t.track_number),
                                                     state: None,
                                                     last_known_bytes: 0,
@@ -130,6 +144,12 @@ impl ProgressTask {
                         ProgressTaskMessage::Done(id) => {
                             self.albums.remove(&id);
                             pending_edit = true;
+
+                            if self.albums.is_empty() {
+                                if let Err(e) = self.refresh_library().await {
+                                    tracing::error!(error = %e, "failed to refresh library");
+                                }
+                            }
                         }
                     }
                 },
@@ -246,6 +266,17 @@ impl ProgressTask {
 
         msg.edit(&self.http, EditMessage::new().content(content))
             .await?;
+
+        Ok(())
+    }
+
+    async fn refresh_library(&self) -> anyhow::Result<()> {
+        let Some(ref client) = self.submarine else {
+            tracing::warn!("navidrome client not configured, skipping library refresh");
+            return Ok(());
+        };
+
+        client.start_scan().await?;
 
         Ok(())
     }

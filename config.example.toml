@@ -5,6 +5,11 @@ dir = "./output"
 token = "SECRET_TOKEN_HERE"
 progress_channel = 123456789012345678
 
+[navidrome]
+url = "https://your.navidrome.instance.here"
+username = "your_username_here"
+password = "your_password_here"
+
 [downloads]
 chunk_concurrency = 12
 track_concurrency = 6

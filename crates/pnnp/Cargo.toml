@@ -25,3 +25,4 @@ unicode-ellipsis = "0.3.0"
 async-stream = "0.3.6"
 bytesize = "2.3.1"
 console-subscriber = "0.5.0"
+submarine = { version = "0.1.1", features = ["navidrome"] }
