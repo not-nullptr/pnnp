@@ -1,14 +1,11 @@
 use crate::{
     config::Config,
     ffmpeg::{Metadata, TranscodeError, Transcoder},
+    track_or_album::TrackOrAlbum,
 };
 use chrono::Datelike;
 use futures::StreamExt;
-use monochrome::{
-    Monochrome, MonochromeError,
-    album::Album,
-    id::{AlbumId, TrackId},
-};
+use monochrome::{Monochrome, MonochromeError, album::Album, id::TrackId};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::{
@@ -38,7 +35,7 @@ pub enum PipelineError {
     #[error("task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 
-    #[error("reqwest error: {0}")]
+    #[error("reqwest error: {0:?}")]
     Reqwest(#[from] reqwest::Error),
 }
 
@@ -95,16 +92,26 @@ impl Pipeline {
 
         let year = self.album.release_date.year() as u32;
 
+        let title = self.album.title.to_string();
+        let cover = self.album.cover;
+        let artist = self.album.artist.clone();
+        let is_single = self.album.tracks.len() == 1;
+
         for track in self.album.tracks {
+            tracing::debug!(track = %track.title, "scheduling track for download and transcoding");
             let semaphore = track_semaphore.clone();
             let client = self.client.clone();
-            let path = album_folder.join(&path_compat(&if multidisc {
-                format!(
-                    "{}.{:02}. {}.opus",
-                    track.volume_number, track.track_number, track.title
-                )
+            let path = album_folder.join(path_compat(&if is_single {
+                format!("{}.opus", track.title)
             } else {
-                format!("{:02}. {}.opus", track.track_number, track.title)
+                if multidisc {
+                    format!(
+                        "{}.{:02}. {}.opus",
+                        track.volume_number, track.track_number, track.title
+                    )
+                } else {
+                    format!("{:02}. {}.opus", track.track_number, track.title)
+                }
             }));
 
             let tx = self.tx.clone();
@@ -121,7 +128,7 @@ impl Pipeline {
                 continue;
             }
 
-            let artist = self.album.artist.clone();
+            let artist = artist.clone();
             let chunk_semaphore = chunk_semaphore.clone();
 
             let permit = semaphore.clone().acquire_owned().await.unwrap();
@@ -130,9 +137,9 @@ impl Pipeline {
                 let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(5);
                 let _permit = permit;
 
-                Retry::spawn(retry_strategy, || async {
+                let inner = async move || {
                     let path = path.to_string_lossy();
-                    let dl_info = client.track(track.id).await?;
+                    let dl_info = client.track_manifest(track.id).await?;
                     let stream = client
                         .download_track(&dl_info, chunk_semaphore.clone())
                         .await?;
@@ -140,11 +147,19 @@ impl Pipeline {
                         stream,
                         Metadata::from((&track, &artist, year)),
                         track.id,
-                        self.album.id,
                         &path,
                     )?;
                     transcoder.run(&tx).await?;
                     Ok(())
+                };
+
+                Retry::spawn(retry_strategy, || async {
+                    if let Err(e) = inner().await {
+                        tracing::error!(error = %e, "error processing track, retrying...");
+                        Err(e)
+                    } else {
+                        Ok(())
+                    }
                 })
                 .await
             });
@@ -154,7 +169,9 @@ impl Pipeline {
 
         {
             let client = self.client.clone();
-            let title = self.album.title.clone();
+            let title = title.clone();
+            let cover = cover.clone();
+
             let album_art_handle: JoinHandle<Result<(), PipelineError>> =
                 tokio::spawn(async move {
                     let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(5);
@@ -166,8 +183,7 @@ impl Pipeline {
                         }
 
                         tracing::info!(album = %title, "downloading album art...");
-                        let album = client.album(self.album.id).await?;
-                        let mut stream = client.album_art(&album).await?;
+                        let mut stream = client.art(cover).await?;
                         let mut file = tokio::fs::File::create(&path).await?;
                         while let Some(chunk) = stream.next().await {
                             let chunk = chunk?;
@@ -217,7 +233,6 @@ fn path_compat(s: &str) -> String {
 // }
 
 pub struct ProgressUpdate {
-    pub album_id: AlbumId,
     pub track_id: TrackId,
     pub state: ProgressState,
 }

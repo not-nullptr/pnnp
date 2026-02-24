@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MonochromeError {
-    #[error("request failed: {0}")]
+    #[error("request failed: {0:?}")]
     Request(#[from] reqwest::Error),
 
     #[error("non-200 response: {0}")]
@@ -19,6 +19,9 @@ pub enum MonochromeError {
 
     #[error("manifest error: {0}")]
     Manifest(#[from] MonochromeManifestError),
+
+    #[error("url parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
 }
 
 #[derive(Debug, Error)]
@@ -41,7 +44,7 @@ pub enum MonochromeManifestError {
     #[error("failed to parse url: {0}")]
     UrlParse(#[from] url::ParseError),
 
-    #[error("failed to fetch segment: {0}")]
+    #[error("failed to fetch segment: {0:?}")]
     FetchSegment(#[from] reqwest::Error),
 
     #[error("no Representation found")]
@@ -61,4 +64,7 @@ pub enum MonochromeManifestError {
 
     #[error("invalid temp path")]
     InvalidTempPath,
+
+    #[error("preview tracks are unsupported")]
+    Preview,
 }

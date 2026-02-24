@@ -1,9 +1,13 @@
 use super::{Data, Error};
-use crate::{bot::progress::ProgressTaskMessage, config::Config, pipeline::Pipeline};
+use crate::{
+    bot::progress::{self, ProgressTaskMessage},
+    config::Config,
+    pipeline::Pipeline,
+    track_or_album::TrackOrAlbum,
+};
 use monochrome::{Monochrome, album::Album};
 use poise::serenity_prelude::{
-    self as serenity, ComponentInteractionDataKind, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse,
+    self as serenity, ComponentInteractionDataKind, CreateInteractionResponseFollowup,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -17,64 +21,92 @@ pub async fn handle_interaction(
         serenity::Interaction::Component(i) => {
             if let Some(m) = i.message.interaction_metadata.as_deref() {
                 if !is_from(m, i.user.id) {
-                    i.create_response(
+                    i.create_followup(
                         &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("sorry, you can't interact with this")
-                                .ephemeral(true),
-                        ),
+                        CreateInteractionResponseFollowup::new()
+                            .content("sorry, you can't interact with this")
+                            .ephemeral(true),
                     )
                     .await?;
                     return Ok(());
                 }
             }
             match i.data.custom_id.as_str() {
-                "album_select" => {
-                    tracing::info!("handling album select interaction");
+                "album_select" | "track_select" => {
+                    tracing::info!("handling music select interaction");
                     let ComponentInteractionDataKind::StringSelect { values } = &i.data.kind else {
                         tracing::error!("unexpected interaction data kind");
                         return Ok(());
                     };
 
-                    let Some(album_id) = values.first().map(|s| s.parse::<u64>().ok()).flatten()
+                    let Some(music_id) = values.first().map(|s| s.parse::<u64>().ok()).flatten()
                     else {
-                        tracing::error!("no album id found in interaction data");
-                        i.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("no album id found in interaction data... this shouldn't happen!"))).await?;
+                        tracing::error!("no music id found in interaction data");
+                        // i.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("no album id found in interaction data... this shouldn't happen!"))).await?;
+                        i.create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new().content(
+                                "no music id found in interaction data... this shouldn't happen!",
+                            ),
+                        )
+                        .await?;
                         return Ok(());
                     };
 
-                    tracing::info!(%album_id, "selected album id");
+                    tracing::info!(%music_id, "selected music id");
 
-                    // let album = client.album(album_id).await?;
+                    i.defer(&ctx.http).await?;
 
-                    let album = match data.client.album(album_id).await {
-                        Ok(album) => album,
+                    tracing::info!(kind = %i.data.custom_id, "deferring interaction response");
+
+                    let album = data.client.album(music_id).await;
+
+                    let album = match album {
+                        Ok(music) => music,
                         Err(e) => {
-                            tracing::error!(error = %e, "failed to fetch album for selected album id");
-                            i.create_response(
+                            tracing::error!(error = %e, "failed to fetch music for selected id");
+                            // i.edit_response(
+                            //     &ctx.http,
+                            //     EditInteractionResponse::new()
+                            //         .content("failed to fetch music for selected id"),
+                            // )
+                            // .await?;
+                            i.create_followup(
                                 &ctx.http,
-                                CreateInteractionResponse::Message(
-                                    CreateInteractionResponseMessage::new()
-                                        .content("failed to fetch album for selected album id"),
-                                ),
+                                CreateInteractionResponseFollowup::new()
+                                    .content(format!("failed to fetch music for selected id: {e}")),
                             )
                             .await?;
                             return Ok(());
                         }
                     };
 
-                    i
-                        .create_response(
+                    if i.data.custom_id == "track_select" && album.kind != "SINGLE" {
+                        tracing::error!(kind = %album.kind, "selected track is not a single");
+                        i.create_followup(
                             &ctx.http,
-                            CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(
+                            CreateInteractionResponseFollowup::new().content(
+                                format!("the selected track is not a single, please use /album to download the whole album ({} - {})", album.artist.name, album.title),
+                            ),
+                        )
+                        .await?;
+
+                        return Ok(());
+                    }
+
+                    let msgs = progress::done_msgs(&album);
+
+                    i
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new().content(
                                 format!(
                                     "your download (**{} - {}**) will start soon! check <#{}> for progress updates",
                                     album.artist.name, album.title,
                                     data.config.bot.progress_channel
                                 )
                             )
-                        ))
+                        )
                         .await?;
 
                     if let Err(e) =
@@ -82,14 +114,14 @@ pub async fn handle_interaction(
                     {
                         tracing::error!(error = %e, "failed to download album");
 
-                        data.progress_tx
-                            .send(ProgressTaskMessage::Done(album_id.into()))
-                            .ok();
+                        for msg in msgs {
+                            data.progress_tx.send(msg)?;
+                        }
 
-                        i.edit_response(
+                        i.create_followup(
                             &ctx.http,
-                            EditInteractionResponse::new()
-                                .content(format!("failed to download album: {e}")),
+                            CreateInteractionResponseFollowup::new()
+                                .content(format!("failed to download: {e}")),
                         )
                         .await?;
                     }
@@ -113,10 +145,15 @@ async fn handle_download(
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let id = album.id;
+    // data.progress_tx
+    //     .send(ProgressTaskMessage::DiscoverAlbum(id, music.clone()))?;
 
-    data.progress_tx
-        .send(ProgressTaskMessage::DiscoverAlbum(id, album.clone()))?;
+    data.progress_tx.send(ProgressTaskMessage::DiscoverAlbum(
+        album.id.into(),
+        album.clone(),
+    ))?;
+
+    let msgs = progress::done_msgs(&album);
 
     let pipeline = Pipeline::new(
         client.clone(),
@@ -138,7 +175,9 @@ async fn handle_download(
         handle.await??;
     }
 
-    data.progress_tx.send(ProgressTaskMessage::Done(id))?;
+    for msg in msgs {
+        data.progress_tx.send(msg)?;
+    }
 
     Ok(())
 }

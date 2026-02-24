@@ -1,17 +1,22 @@
-use crate::id::{AlbumId, ArtistId, TrackId};
+use crate::{
+    artist::Artist,
+    id::{AlbumId, TrackId},
+};
 use base64::{Engine, prelude::BASE64_STANDARD};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Track {
+pub struct TrackManifest {
     pub track_id: TrackId,
+    pub asset_presentation: String,
     pub manifest_mime_type: String,
     pub manifest: String,
 }
 
-impl Track {
+impl TrackManifest {
     pub fn decode_manifest(&self) -> Result<String, base64::DecodeError> {
         let decoded = BASE64_STANDARD.decode(&self.manifest)?;
         Ok(String::from_utf8_lossy(&decoded).into())
@@ -20,15 +25,16 @@ impl Track {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct TrackResult {
+pub struct Track {
     pub id: TrackId,
     pub title: String,
-    pub artist: TrackArtist,
-    pub artists: Vec<TrackArtist>,
+    pub artist: Artist,
+    pub artists: Vec<Artist>,
     pub album: TrackAlbum,
     pub duration: u32,
     pub track_number: u32,
     pub volume_number: u32,
+    pub stream_start_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -37,13 +43,4 @@ pub struct TrackAlbum {
     pub id: AlbumId,
     pub title: String,
     pub cover: Uuid,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TrackArtist {
-    pub id: ArtistId,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub kind: String,
 }

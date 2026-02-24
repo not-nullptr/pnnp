@@ -19,6 +19,13 @@ macro_rules! id {
                     self.0.fmt(f)
                 }
             }
+
+
+            impl From<$id> for u64 {
+                fn from(value: $id) -> Self {
+                    value.0
+                }
+            }
         )*
     };
 }

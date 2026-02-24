@@ -1,0 +1,13 @@
+use super::Context;
+use super::Error;
+use crate::bot::search;
+use crate::bot::search::SearchKind;
+
+/// searches for singles and gives you the option to download them
+#[poise::command(slash_command, prefix_command)]
+pub async fn single(
+    ctx: Context<'_>,
+    #[description = "single name to search for"] query: String,
+) -> Result<(), Error> {
+    search::search_command(ctx, &query, SearchKind::Single).await
+}

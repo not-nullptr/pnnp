@@ -1,9 +1,5 @@
 use futures::{Stream, StreamExt};
-use monochrome::{
-    artist::Artist,
-    id::{AlbumId, TrackId},
-    track::TrackResult,
-};
+use monochrome::{artist::Artist, id::TrackId, track::Track};
 use std::process::Stdio;
 use thiserror::Error;
 use tokio::{
@@ -37,8 +33,8 @@ pub struct Metadata<'a> {
     pub year: Option<u32>,
 }
 
-impl<'a> From<(&'a TrackResult, &'a Artist, u32)> for Metadata<'a> {
-    fn from((track, artist, year): (&'a TrackResult, &'a Artist, u32)) -> Self {
+impl<'a> From<(&'a Track, &'a Artist, u32)> for Metadata<'a> {
+    fn from((track, artist, year): (&'a Track, &'a Artist, u32)) -> Self {
         Self {
             album: Some(&track.album.title),
             album_artist: Some(&artist.name),
@@ -60,7 +56,6 @@ pub struct Transcoder<S> {
     artists: Vec<String>,
     stream: S,
     track_id: TrackId,
-    album_id: AlbumId,
     output: String,
 }
 
@@ -69,7 +64,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         stream: S,
         metadata: Metadata,
         track_id: TrackId,
-        album_id: AlbumId,
         output: &str,
     ) -> Result<Self, std::io::Error> {
         let mut args = vec![
@@ -138,7 +132,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             child,
             stream,
             track_id,
-            album_id,
             artists: metadata.artists.iter().map(|s| s.to_string()).collect(),
             output: output.to_string(),
         })
@@ -159,7 +152,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         }
 
         tx.send(ProgressUpdate {
-            album_id: self.album_id,
             track_id: self.track_id,
             state: ProgressState::Downloading(0),
         })
@@ -175,7 +167,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             downloaded += chunk.len() as u64;
 
             tx.send(ProgressUpdate {
-                album_id: self.album_id,
                 track_id: self.track_id,
                 state: ProgressState::Downloading(downloaded),
             })
@@ -190,7 +181,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         stdin.flush().await?;
 
         tx.send(ProgressUpdate {
-            album_id: self.album_id,
             track_id: self.track_id,
             state: ProgressState::Transcoding,
         })
@@ -205,6 +195,8 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
             tracing::error!(%status, "ffmpeg exited with non-zero status");
             return Err(TranscodeError::NonZeroExit(status));
         }
+
+        tracing::info!(track = %self.track_id, "ffmpeg transcoding finished successfully");
 
         // we also need to run opustags for multi artist
         if self.artists.len() > 1 {
@@ -225,7 +217,6 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         }
 
         tx.send(ProgressUpdate {
-            album_id: self.album_id,
             track_id: self.track_id,
             state: ProgressState::Finished,
         })

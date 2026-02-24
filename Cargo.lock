@@ -1639,6 +1639,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-ellipsis",
+ "uuid",
 ]
 
 [[package]]

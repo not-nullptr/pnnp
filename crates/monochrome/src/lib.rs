@@ -1,19 +1,20 @@
 pub mod album;
 pub mod artist;
+pub mod endpoint;
 mod error;
 pub mod id;
 mod response;
 pub mod track;
 
-use std::sync::Arc;
+use std::{fs, sync::Arc, time::Duration};
 
 use crate::{
     album::{Album, AlbumResult},
     artist::Artist,
+    endpoint::{Endpoint, FetchKind},
     error::MonochromeManifestError,
     id::{AlbumId, TrackId},
-    response::MonochromeResponse,
-    track::{Track, TrackResult},
+    track::{Track, TrackManifest},
 };
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -25,37 +26,37 @@ use serde::{Deserialize, Deserializer};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-const BASE_URL: &'static str = "https://arran.monochrome.tf";
 const RESOURCES_URL: &'static str = "https://resources.tidal.com/images";
 
 #[derive(Debug, Clone)]
 pub struct Monochrome {
-    client: reqwest::Client,
+    endpoint: Endpoint,
 }
 
 impl Monochrome {
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+    pub fn new(endpoint: Endpoint) -> Self {
+        Self { endpoint }
     }
 
-    pub async fn track(&self, id: impl Into<TrackId>) -> Result<Track, MonochromeError> {
-        const PATH: &'static str = "track";
-        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
-        self.fetch(
-            URL,
-            [
-                ("id", id.into().to_string().as_ref()),
-                ("quality", "HI_RES_LOSSLESS"),
-            ],
-        )
-        .await
+    pub async fn track_manifest(
+        &self,
+        id: impl Into<TrackId>,
+    ) -> Result<TrackManifest, MonochromeError> {
+        self.endpoint
+            .fetch(
+                "track",
+                FetchKind::Streaming,
+                [
+                    ("id", id.into().to_string().as_ref()),
+                    ("quality", "HI_RES_LOSSLESS"),
+                ],
+            )
+            .await
     }
 
     pub async fn download_track(
         &self,
-        track: &Track,
+        track: &TrackManifest,
         chunk_semaphore: Arc<Semaphore>,
     ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
         let manifest = track.decode_manifest()?;
@@ -76,7 +77,13 @@ impl Monochrome {
             return Err(MonochromeError::ManifestDecode);
         };
 
-        let res = self.client.get(url).send().await?;
+        let res = self
+            .endpoint
+            .client()
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
         if res.status() != reqwest::StatusCode::OK {
             return Err(MonochromeError::Non200(res.text().await?));
         }
@@ -134,20 +141,20 @@ impl Monochrome {
         let media_tpl = media_tpl.to_string();
 
         Ok(try_stream! {
-            let init_bytes = self.client.get(init_url).send().await?.bytes().await?;
+            let init_bytes = self.endpoint.client().get(init_url).timeout(Duration::from_secs(5)).send().await?.bytes().await?;
             yield init_bytes;
 
             let mut futs = FuturesOrdered::new();
 
             for (idx, _dur) in segment_counts.iter().enumerate() {
-                let client = self.client.clone();
+                let client = self.endpoint.client();
                 let sem = chunk_semaphore.clone();
                 let number = start_number + idx as u64;
                 let url = media_tpl.replace("$Number$", &number.to_string());
 
                 futs.push_back(tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.unwrap();
-                    client.get(url).send().await?.bytes().await
+                    client.get(url).timeout(Duration::from_secs(5)).send().await?.bytes().await
                 }));
             }
 
@@ -160,17 +167,19 @@ impl Monochrome {
     pub async fn search_tracks(
         &self,
         query: impl AsRef<str>,
-    ) -> Result<Vec<TrackResult>, MonochromeError> {
+    ) -> Result<Vec<Track>, MonochromeError> {
         let query = query.as_ref();
 
         #[derive(Debug, Deserialize)]
         struct Res {
-            items: Vec<TrackResult>,
+            items: Vec<Track>,
         }
 
-        const PATH: &'static str = "search";
-        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
-        let res: Res = self.fetch(URL, [("s", query)]).await?;
+        let res: Res = self
+            .endpoint
+            .fetch("search", FetchKind::Api, [("s", query)])
+            .await?;
+
         Ok(res.items)
     }
 
@@ -190,17 +199,16 @@ impl Monochrome {
             items: Vec<AlbumResult>,
         }
 
-        const PATH: &'static str = "search";
-        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
-        let res: Res = self.fetch(URL, [("al", query)]).await?;
+        let res: Res = self
+            .endpoint
+            .fetch("search", FetchKind::Api, [("al", query)])
+            .await?;
+
         Ok(res.albums.items)
     }
 
     pub async fn album(&self, id: impl Into<id::AlbumId>) -> Result<album::Album, MonochromeError> {
-        const PATH: &'static str = "album";
-        const URL: &'static str = const_format::formatcp!("{BASE_URL}/{PATH}");
-
-        #[derive(Deserialize)]
+        #[derive(Debug, Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct AlbumTemp {
             pub id: AlbumId,
@@ -208,31 +216,35 @@ impl Monochrome {
             pub release_date: chrono::NaiveDate,
             pub artist: Artist,
             pub artists: Vec<Artist>,
-            pub items: Vec<Item>,
             pub cover: Uuid,
+            pub items: Vec<Item>,
+            #[serde(rename = "type")]
+            pub kind: String,
         }
 
-        #[derive(Deserialize)]
+        #[derive(Debug, Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Item {
             #[serde(rename = "type")]
             pub kind: String,
-            #[serde(default, deserialize_with = "null_on_error")]
-            pub item: Option<TrackResult>,
+            pub item: Track,
         }
 
         let res: AlbumTemp = self
-            .fetch(URL, [("id", id.into().to_string().as_str())])
+            .endpoint
+            .fetch(
+                "album",
+                FetchKind::Api,
+                [("id", id.into().to_string().as_str())],
+            )
             .await?;
 
         let tracks = res
             .items
             .into_iter()
             .filter_map(|i| {
-                if i.kind == "track"
-                    && let Some(track) = i.item
-                {
-                    Some(track)
+                if i.kind == "track" {
+                    Some(i.item)
                 } else {
                     None
                 }
@@ -246,8 +258,19 @@ impl Monochrome {
             artist: res.artist,
             artists: res.artists,
             cover: res.cover,
+            kind: res.kind,
             tracks,
         })
+    }
+
+    pub async fn track(&self, id: impl Into<id::TrackId>) -> Result<track::Track, MonochromeError> {
+        self.endpoint
+            .fetch(
+                "track",
+                FetchKind::Api,
+                [("id", id.into().to_string().as_str())],
+            )
+            .await
     }
 
     pub async fn album_art(
@@ -257,32 +280,24 @@ impl Monochrome {
         self.art(album.cover).await
     }
 
-    async fn art(
+    pub async fn art(
         &self,
         uuid: Uuid,
     ) -> Result<impl Stream<Item = Result<Bytes, reqwest::Error>>, MonochromeError> {
         let id = uuid.to_string().replace("-", "/");
         let url = format!("{RESOURCES_URL}/{id}/1280x1280.jpg");
-        let res = self.client.get(url).send().await?;
+        let res = self
+            .endpoint
+            .client()
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
         if res.status() != reqwest::StatusCode::OK {
             return Err(MonochromeError::Non200(res.text().await?));
         }
 
         Ok(res.bytes_stream())
-    }
-
-    async fn fetch<T, Q>(&self, url: &str, query: Q) -> Result<T, MonochromeError>
-    where
-        T: serde::de::DeserializeOwned,
-        Q: serde::ser::Serialize,
-    {
-        let response = self.client.get(url).query(&query).send().await?;
-        if response.status() != reqwest::StatusCode::OK {
-            return Err(MonochromeError::Non200(response.text().await?));
-        }
-
-        let data = response.json::<MonochromeResponse<T>>().await?;
-        Ok(data.data)
     }
 }
 

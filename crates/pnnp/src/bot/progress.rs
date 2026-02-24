@@ -3,6 +3,7 @@ use chrono::{Datelike, NaiveDate};
 use monochrome::{
     album::Album,
     id::{AlbumId, TrackId},
+    track::Track,
 };
 use poise::serenity_prelude::{self as serenity, CreateMessage, EditMessage, Message};
 use std::{collections::HashMap, sync::Arc};
@@ -16,6 +17,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::Config,
     pipeline::{ProgressState, ProgressUpdate},
+    track_or_album::TrackOrAlbum,
 };
 
 pub struct ProgressTask {
@@ -23,19 +25,21 @@ pub struct ProgressTask {
     http: Arc<serenity::Http>,
     channel: serenity::ChannelId,
     albums: HashMap<AlbumId, AlbumProgress>,
+    tracks: HashMap<TrackId, TrackProgress>,
     count: usize,
     submarine: Option<submarine::Client>,
 }
 
 pub enum ProgressTaskMessage {
     DiscoverAlbum(AlbumId, Album),
+    DiscoverTrack(TrackId, Track),
     Progress(ProgressUpdate),
-    Done(AlbumId),
+    TrackDone(TrackId),
 }
 
 struct AlbumProgress {
     sort: usize,
-    tracks: HashMap<TrackId, TrackProgress>,
+    tracks: Vec<TrackId>,
     title: String,
     artist: String,
     release_date: NaiveDate,
@@ -46,6 +50,7 @@ struct TrackProgress {
     sort: (u32, u32),
     state: Option<ProgressState>,
     last_known_bytes: u64,
+    album_id: Option<AlbumId>,
 }
 
 impl ProgressTask {
@@ -60,6 +65,7 @@ impl ProgressTask {
             http,
             channel,
             albums: HashMap::new(),
+            tracks: HashMap::new(),
             count: 0,
             submarine: config.navidrome.as_ref().map(|nav| {
                 submarine::Client::new(
@@ -96,62 +102,7 @@ impl ProgressTask {
             tokio::select! {
                 msg = self.rx.recv() => {
                     let Some(msg) = msg else { break };
-                    match msg {
-                        ProgressTaskMessage::DiscoverAlbum(id, album) => {
-                            self.albums.insert(
-                                id,
-                                AlbumProgress {
-                                    tracks: album
-                                        .tracks
-                                        .into_iter()
-                                        .map(|t| {
-                                            (
-                                                t.id,
-                                                TrackProgress {
-                                                    // name: t.title,
-                                                    sort: (t.volume_number, t.track_number),
-                                                    state: None,
-                                                    last_known_bytes: 0,
-                                                },
-                                            )
-                                        })
-                                        .collect(),
-                                    title: album.title,
-                                    release_date: album.release_date,
-                                    artist: album.artist.name,
-                                    sort: self.count,
-                                },
-                            );
-                            self.count = self.count.wrapping_add(1);
-                        }
-                        ProgressTaskMessage::Progress(update) => {
-                            let Some(album) = self.albums.get_mut(&update.album_id) else {
-                                continue;
-                            };
-                            let Some(track) = album.tracks.get_mut(&update.track_id) else {
-                                continue;
-                            };
-
-                            track.last_known_bytes = match update.state {
-                                ProgressState::Downloading(bytes) => bytes,
-                                _ => track.last_known_bytes,
-                            };
-
-                            track.state = Some(update.state);
-                            pending_edit = true;
-                        }
-
-                        ProgressTaskMessage::Done(id) => {
-                            self.albums.remove(&id);
-                            pending_edit = true;
-
-                            if self.albums.is_empty() {
-                                if let Err(e) = self.refresh_library().await {
-                                    tracing::error!(error = %e, "failed to refresh library");
-                                }
-                            }
-                        }
-                    }
+                    pending_edit = self.handle_message(msg).await?;
                 },
 
                 _ = tokio::time::sleep(timeout), if pending_edit => {
@@ -178,7 +129,12 @@ impl ProgressTask {
         albums.sort_by_key(|a| a.sort);
 
         for progress in albums {
-            let mut tracks = progress.tracks.iter().map(|(_, t)| t).collect::<Vec<_>>();
+            let mut tracks = progress
+                .tracks
+                .iter()
+                .filter_map(|id| self.tracks.get(id))
+                .collect::<Vec<_>>();
+
             tracks.sort_by_key(|t| t.sort);
             let num_completed = tracks
                 .iter()
@@ -267,6 +223,8 @@ impl ProgressTask {
         msg.edit(&self.http, EditMessage::new().content(content))
             .await?;
 
+        tracing::info!("edited progress message");
+
         Ok(())
     }
 
@@ -280,4 +238,128 @@ impl ProgressTask {
 
         Ok(())
     }
+
+    async fn handle_message(&mut self, msg: ProgressTaskMessage) -> anyhow::Result<bool> {
+        match msg {
+            ProgressTaskMessage::DiscoverAlbum(id, album) => {
+                self.albums.insert(
+                    id,
+                    AlbumProgress {
+                        tracks: album.tracks.iter().map(|t| t.id).collect(),
+                        title: album.title,
+                        release_date: album.release_date,
+                        artist: album.artist.name,
+                        sort: self.count,
+                    },
+                );
+
+                self.tracks.extend(album.tracks.into_iter().map(|t| {
+                    (
+                        t.id,
+                        TrackProgress {
+                            sort: (t.volume_number, t.track_number),
+                            state: None,
+                            last_known_bytes: 0,
+                            album_id: Some(id),
+                        },
+                    )
+                }));
+
+                self.count = self.count.wrapping_add(1);
+
+                Ok(true)
+            }
+
+            ProgressTaskMessage::DiscoverTrack(id, track) => {
+                self.tracks.insert(
+                    id,
+                    TrackProgress {
+                        sort: (track.volume_number, track.track_number),
+                        state: None,
+                        last_known_bytes: 0,
+                        album_id: None,
+                    },
+                );
+
+                Ok(true)
+            }
+
+            ProgressTaskMessage::Progress(update) => {
+                let Some(track) = self.tracks.get_mut(&update.track_id) else {
+                    return Ok(false);
+                };
+
+                track.last_known_bytes = match update.state {
+                    ProgressState::Downloading(bytes) => bytes,
+                    _ => track.last_known_bytes,
+                };
+
+                track.state = Some(update.state);
+
+                if let Some(album_id) = track.album_id {
+                    self.progress_update(album_id).await;
+                }
+
+                Ok(true)
+            }
+
+            ProgressTaskMessage::TrackDone(id) => {
+                let album_id = self.tracks.get(&id).and_then(|t| t.album_id);
+
+                if let Some(album_id) = album_id {
+                    self.progress_update(album_id).await;
+                } else {
+                    self.track_removal(id).await;
+                }
+
+                Ok(true)
+            }
+        }
+    }
+
+    async fn progress_update(&mut self, album_id: AlbumId) -> bool {
+        let Some(album) = self.albums.get(&album_id) else {
+            return false;
+        };
+
+        let all_finished = album
+            .tracks
+            .iter()
+            .filter_map(|id| self.tracks.get(id))
+            .all(|t| matches!(t.state, Some(ProgressState::Finished)));
+
+        if all_finished {
+            tracing::info!(album = %album.title, "album completed, removing from progress");
+            let track_ids = album.tracks.clone();
+            for track_id in track_ids {
+                self.track_removal(track_id).await;
+            }
+
+            self.albums.remove(&album_id);
+
+            return true;
+        }
+
+        false
+    }
+
+    async fn track_removal(&mut self, track_id: TrackId) {
+        let are_we_last = self.tracks.len() == 1;
+        self.tracks.remove(&track_id);
+
+        if self.tracks.is_empty() && are_we_last {
+            tracing::info!("all downloads completed, refreshing library...");
+            if let Err(e) = self.refresh_library().await {
+                tracing::error!(error = %e, "failed to refresh library");
+            }
+        }
+    }
+}
+
+pub fn done_msgs(album: &Album) -> Vec<ProgressTaskMessage> {
+    album
+        .tracks
+        .iter()
+        .map(|t| ProgressTaskMessage::TrackDone(t.id))
+        .collect()
 }

@@ -6,4 +6,6 @@ use serde::{Deserialize, Serialize};
 pub struct Artist {
     pub id: ArtistId,
     pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
