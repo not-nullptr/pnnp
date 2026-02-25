@@ -144,7 +144,7 @@ impl Monochrome {
             let init_bytes = self.endpoint.client().get(init_url).timeout(Duration::from_secs(5)).send().await?.bytes().await?;
             yield init_bytes;
 
-            let mut futs = FuturesOrdered::new();
+            let mut handles = Vec::new();
 
             for (idx, _dur) in segment_counts.iter().enumerate() {
                 let client = self.endpoint.client();
@@ -152,14 +152,15 @@ impl Monochrome {
                 let number = start_number + idx as u64;
                 let url = media_tpl.replace("$Number$", &number.to_string());
 
-                futs.push_back(tokio::spawn(async move {
+                handles.push(tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.unwrap();
                     client.get(url).timeout(Duration::from_secs(5)).send().await?.bytes().await
                 }));
             }
 
-            while let Some(res) = futs.next().await {
-                yield res.unwrap()?;
+            for handle in handles {
+                let res = handle.await.unwrap()?;
+                yield res;
             }
         })
     }
