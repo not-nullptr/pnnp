@@ -60,6 +60,13 @@ impl TrackOrAlbum {
             TrackOrAlbum::Album(album) => album.id,
         }
     }
+
+    pub fn id(&self) -> u64 {
+        match self {
+            TrackOrAlbum::Track(track) => track.id.into(),
+            TrackOrAlbum::Album(album) => album.id.into(),
+        }
+    }
 }
 
 pub struct TrackIteratorRef<'a> {

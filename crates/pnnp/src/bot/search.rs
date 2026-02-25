@@ -75,7 +75,7 @@ pub async fn search_command(ctx: Context<'_>, query: &str, kind: SearchKind) -> 
                             ),
                             100,
                         ),
-                        music.album_id().to_string(),
+                        format!("{}:{}", music.album_id(), music.id()),
                     )
                 })
                 .collect(),

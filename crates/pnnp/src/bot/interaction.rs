@@ -39,7 +39,11 @@ pub async fn handle_interaction(
                         return Ok(());
                     };
 
-                    let Some(music_id) = values.first().map(|s| s.parse::<u64>().ok()).flatten()
+                    let Some(music_id) = values
+                        .first()
+                        .and_then(|s| s.split(":").next())
+                        .map(|s| s.parse::<u64>().ok())
+                        .flatten()
                     else {
                         tracing::error!("no music id found in interaction data");
                         // i.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("no album id found in interaction data... this shouldn't happen!"))).await?;
