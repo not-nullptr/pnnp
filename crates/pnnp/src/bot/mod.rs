@@ -1,3 +1,4 @@
+mod cat;
 mod data;
 mod download;
 mod interaction;
@@ -47,6 +48,15 @@ pub async fn start(client: Monochrome, config: Config) -> anyhow::Result<()> {
                 tracing::info!(user = %ready.user.name, "bot is ready");
                 // delete the last message in the progress channel, just to clean up any old messages from previous runs
                 let channel = serenity::ChannelId::new(config.bot.progress_channel);
+
+                if let Some(cat_channel) = config.bot.cat_channel {
+                    let cat_channel = serenity::ChannelId::new(cat_channel);
+                    let http = ctx.http.clone();
+                    let uid = ready.user.id;
+                    tokio::spawn(async move {
+                        cat::cat(http, cat_channel, uid).await;
+                    });
+                }
 
                 Box::pin(async move {
                     if let Some(msg) = channel

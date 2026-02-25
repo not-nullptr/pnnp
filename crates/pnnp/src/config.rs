@@ -21,6 +21,7 @@ pub struct OutputConfig {
 pub struct BotConfig {
     pub token: String,
     pub progress_channel: u64,
+    pub cat_channel: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
