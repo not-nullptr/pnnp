@@ -1,9 +1,8 @@
-mod album;
 mod data;
+mod download;
 mod interaction;
 mod progress;
 mod search;
-mod single;
 
 use std::sync::Arc;
 
@@ -28,7 +27,7 @@ pub async fn start(client: Monochrome, config: Config) -> anyhow::Result<()> {
 
         poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![album::album(), single::single()],
+                commands: vec![download::download()],
                 event_handler: |ctx, event, _, data| {
                     Box::pin(async move {
                         match event {

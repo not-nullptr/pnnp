@@ -1,6 +1,6 @@
-use crate::track_or_album::TrackOrAlbum;
-
 use super::{Context, Error};
+use crate::track_or_album::TrackOrAlbum;
+use poise::ChoiceParameter;
 use poise::CreateReply;
 use poise::serenity_prelude::CreateActionRow;
 use poise::serenity_prelude::CreateSelectMenu;
@@ -8,6 +8,7 @@ use poise::serenity_prelude::CreateSelectMenuKind;
 use poise::serenity_prelude::CreateSelectMenuOption;
 use unicode_ellipsis::truncate_str;
 
+#[derive(Debug, Clone, Copy, ChoiceParameter)]
 pub enum SearchKind {
     Single,
     Album,

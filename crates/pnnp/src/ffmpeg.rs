@@ -125,7 +125,7 @@ impl<S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin> Transcoder<
         let child = Command::new("ffmpeg")
             .args(&args)
             .stdin(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
 
         Ok(Self {
